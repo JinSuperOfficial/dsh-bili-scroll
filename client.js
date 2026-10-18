@@ -483,6 +483,19 @@ window.__ModuleLoader__.load({
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
+        /* ── 给 AI 的接口 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '给 AI 的接口'),
+          h(ToggleRow, {
+            label: '对模型开放 bilibili_skills',
+            note: '开了之后模型可以按任意主题召唤子模型刷一轮（只检索、不发评论）；人也可以直接用 /bilibili-skills 查找关于XX的视频。'
+              + '关掉立即生效；重新打开要重启一次 dsh（工具目录在启动时组装）',
+            on: sw('aiTool'),
+            onChange: (v) => patch({ aiTool: v }, '对模型开放接口'),
+          }),
+          h('div', { 'data-bd-note': '' },
+            '日志和报告会写到「当前工作目录/bilibili/」；人设仍然按上面填的工作区里的 AGENTS.md。')),
+
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),

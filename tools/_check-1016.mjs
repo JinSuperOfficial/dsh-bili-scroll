@@ -182,6 +182,18 @@ ok(/dmMode: z\.string\(\)\.default\('off'\)/.test(idx), 'dmMode 默认不是 off
 ok(idx.includes('commentOn'), '没有 commentOn 这个统一判据（工具闸和提示词会各说各话）')
 ok(duty.includes('500') || idx.includes('500'), '私信没写 500 字上限（超了接口直接拒）')
 
+// ⑰ 给 AI 的接口：专题检索（/bilibili-skills + bilibili_skills）
+ok(idx.includes("name: 'bilibili_skills'"), '没有 bilibili_skills 工具（模型没法按主题刷）')
+ok(idx.includes("name: 'bilibili-skills'"), '没有 /bilibili-skills 命令')
+ok(idx.includes('const startQuery = '), '没有 startQuery（命令 / 工具共用的子模型入口）')
+ok(idx.includes('const promptForQuery = '), '没有专题检索的提示词')
+ok(idx.includes("join(base, 'bilibili')"), '日志没写到 <cwd>/bilibili/')
+ok(idx.includes('promptForQuery({ query'), 'startQuery 没把专题交给提示词')
+ok(idx.includes('aiTool: z.boolean()'), 'schema 里没有 aiTool（对模型开放接口的开关）')
+ok(idx.includes('"commands"') || idx.includes("'commands'"), '没有 commands 注入（/bilibili-skills 注册不上）')
+ok(cli.includes("'aiTool'"), '设置页没有 aiTool 开关')
+ok(idx.includes('readOnly') && idx.includes('headless-overlay-query.yml'), '专题检索没有独立的只读 overlay（会拿到发评论的工具）')
+
 console.log(fail.length ? '❌ 有 ' + fail.length + ' 条没过（共 ' + total + ' 条）：' : `✅ 全部 ${total} 条断言通过`)
 for (const f of fail) console.log('   - ' + f)
 process.exit(fail.length ? 1 : 0)
