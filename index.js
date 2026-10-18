@@ -25,7 +25,7 @@ const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
@@ -679,10 +679,19 @@ export function apply(ctx, config) {
     // ⭐ 2026-10-18：**最可靠的一条** —— 我们现在就活在 dsh 里：宿主进程的 `argv[1]` 就是 dsh 的入口
     //    （`node /path/to/dsh --profile web`）。以前不认这条，npm 全局装的也报「找不到 dsh」，
     //    再退到 `shell: true` ⇒ 多行提示词被 /bin/sh 当脚本执行（见 spawnHeadless 的事故注释）✗
+    //    ⚠️ npm 全局的那个 shim 叫 `~/.npm-global/bin/dsh`、**没有扩展名**，所以别按 `.js` 判；
+    //    认两种形状：名字就叫 dsh（dsh / dsh.cmd / dsh.js…），或者解析后是 `…/dsh/lib/bin.js`。
     //    Electron 例外：那里的 argv[1] 是应用自己的主脚本，先用上面的 resourcesPath 几条。
     if (!process.versions.electron) {
       const self = process.argv?.[1]
-      if (self && existsSync(self) && /\.(?:js|mjs|cjs)$/i.test(self)) return dshFromFile(self)
+      if (self && existsSync(self)) {
+        let real = self
+        try { real = realpathSync(self) } catch { /* 不是链接就用原路径 */ }
+        const base = basename(real).toLowerCase()
+        if (/^dsh(?:\.(?:cmd|exe|js|mjs|cjs))?$/i.test(base) || (base === 'bin.js' && /[\\/]dsh[\\/]/i.test(real))) {
+          return dshFromFile(real)
+        }
+      }
     }
     for (const g of guesses) if (existsSync(g)) return dshFromFile(g)
     // ⚠️ 走到这儿就是真找不到 —— 一定要出声（静默失败比报错更坏）
