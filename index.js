@@ -888,6 +888,25 @@ export function apply(ctx, config) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
 
+  /**
+   * ⭐ 专题检索的台账（设置页「历史」靠它 —— 不用再去工作目录里翻文件）。
+   *    <家>/queries.json：最近 100 条；一条 = 一次 /bilibili-skills 或 bilibili_skills 调用。
+   *    状态 running → ok / error（退出码不是 0 算 error，但报告照样能看）。
+   *    报告正文**不**塞进台账（要的时候按 id 去读文件），台账只存路径。
+   */
+  const queryLedgerFile = join(stateDir, 'queries.json')
+  const readLedger = () => {
+    const arr = readJson(queryLedgerFile, [])
+    return Array.isArray(arr) ? arr.filter((x) => x && typeof x.id === 'string' && x.id) : []
+  }
+  const ledgerUpsert = (entry) => {
+    try {
+      const arr = readLedger().filter((x) => x.id !== entry.id)
+      arr.unshift(entry)
+      writeJson(queryLedgerFile, arr.slice(0, 100))
+    } catch (e) { log(`写专题台账失败：${e?.message ?? e}`) }
+  }
+
   const startQuery = ({ query, limit, dir, source = 'tool' }) => {
     refreshCfg()
     const q = String(query || '').trim()
@@ -900,6 +919,10 @@ export function apply(ctx, config) {
     const slug = slugForQuery(q) || 'query'
     const report = join(outBase, `${ts}-${slug}.md`)
     const logFile = join(outBase, `${ts}-${slug}.log`)
+    const id = `${ts}-${slug}`
+    const startedAt = new Date().toISOString()
+    const entry = { id, ts: startedAt, query: q, limit: lim, dir: outBase, report, log: logFile, source, status: 'running', exit: null, size: 0 }
+    ledgerUpsert(entry)
     const prompt = promptForQuery({ query: q, limit: lim, reportFile: report })
     try {
       appendFileSync(logFile, [
@@ -943,6 +966,16 @@ export function apply(ctx, config) {
           } catch { /* 占位报告写不进去就算了 */ }
         }
         log(`专题检索结束（${source}，code=${code}）：${report}`)
+        // ⭐ 台账收尾：状态 + 退出码 + 报告大小 + 挑中几条（设置页的「历史」直接列这些）
+        try {
+          let size = 0
+          let picked = 0
+          try {
+            size = statSync(report).size
+            picked = (readFileSync(report, 'utf8').match(/^### /gm) || []).length
+          } catch { /* 没写出来就没有 */ }
+          ledgerUpsert({ ...entry, status: code === 0 ? 'ok' : 'error', exit: code, size, picked, at: new Date().toISOString() })
+        } catch { /* 台账写不进去不能影响这一轮 */ }
         queryChildren.delete(child)
         resolve(code)
       }
@@ -953,7 +986,7 @@ export function apply(ctx, config) {
       child.on('exit', (code) => finish(Number(code)))
     })
     queryChildren.add(child)
-    return { ok: true, started: true, query: q, limit: lim, dir: outBase, report, log: logFile, pid: child.pid, done }
+    return { ok: true, started: true, id, query: q, limit: lim, dir: outBase, report, log: logFile, pid: child.pid, done }
   }
 
   // 插件卸载 / 重载时别把子进程晾在那儿
@@ -990,6 +1023,7 @@ export function apply(ctx, config) {
         if (args.background === true) {
           return { ok: true, started: true, query: r.query, report: r.report, log: r.log, dir: r.dir, hint: '子模型在后台跑；稍后看报告/日志' }
         }
+        const t0 = Date.now()
         const code = await Promise.race([
           r.done,
           new Promise((resolve) => setTimeout(() => resolve('timeout'), 10 * 60 * 1000)),
@@ -999,9 +1033,20 @@ export function apply(ctx, config) {
         }
         let reportText = ''
         try { reportText = readFileSync(r.report, 'utf8').slice(0, 12000) } catch { /* 读不到就只给路径 */ }
-        let logTail = ''
-        try { logTail = readFileSync(r.log, 'utf8').slice(-2000) } catch { /* 同上 */ }
-        return { ok: true, query: r.query, exit: code, report: r.report, log: r.log, dir: r.dir, reportText, logTail }
+        // ⭐ 只回「结果本身」（几条、挑中几条、花了多久），**不把日志/提示词倒回对话**：
+        //    日志里是整段提示词（含着用户的 AGENTS.md），每次调用都重复一遍纯属噪声 ✗
+        //    失败时才给日志尾巴，而且只取「--- 子进程输出 ---」之后那段。
+        const picked = (reportText.match(/^### /gm) || []).length
+        const took = Math.max(0, Math.round((Date.now() - t0) / 1000))
+        const out = { ok: code === 0, exit: code, query: r.query, took, picked, dir: r.dir, report: r.report, log: r.log, reportText }
+        if (code !== 0 || !reportText) {
+          try {
+            const all = readFileSync(r.log, 'utf8')
+            const i = all.lastIndexOf('--- 子进程输出 ---')
+            out.logTail = (i >= 0 ? all.slice(i + '--- 子进程输出 ---'.length) : all).trim().slice(-800)
+          } catch { /* 读不到就算了，路径还在 */ }
+        }
+        return out
       },
     })
   }
@@ -1512,6 +1557,27 @@ export function apply(ctx, config) {
     // 装"本地转写"那套（独立环境：faster-whisper + yt-dlp + Whisper 模型）
     if (req.method === 'POST' && path === '/api/bili-duty/install-asr') {
       return sendJson(res, 200, runAsrInstall())
+    }
+
+    // ⭐ 「专题检索历史」：设置页列出来跑过的专题 —— 点一条直接读报告正文，不用再去文件夹里翻
+    if (req.method === 'GET' && path === '/api/bili-duty/queries') {
+      const items = readLedger().map((x) => {
+        let reportExists = false
+        try { reportExists = existsSync(x.report) } catch { /* 路径失效就当没有 */ }
+        return { ...x, reportExists }
+      })
+      return sendJson(res, 200, { ok: true, items, home: stateDir })
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/query') {
+      const id = String(url.searchParams.get('id') || '')
+      const item = readLedger().find((x) => x.id === id)
+      if (!item) return sendJson(res, 404, { ok: false, error: '没有这条记录（可能超过 100 条，被新的挤掉了）' })
+      let text = ''
+      let logTail = ''
+      try { text = readFileSync(item.report, 'utf8').slice(0, 200000) } catch { /* 报告被删了就只给路径 */ }
+      try { logTail = readFileSync(item.log, 'utf8').slice(-4000) } catch { /* 日志被删了同理 */ }
+      return sendJson(res, 200, { ok: true, item, text, logTail })
     }
 
     // ⭐ 「复核评论」：拿判重表里最近的记录，去 B站 核一遍到底公开可见没有
