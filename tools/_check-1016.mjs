@@ -210,6 +210,16 @@ ok(!/args\.push\(promptFor\(\)\)/.test(idx), '每日那轮还在把提示词塞�
 ok(/process\.argv\?\.\[1\]/.test(idx), 'resolveDsh 没认 argv[1]（npm 全局装的 dsh 也会报"找不到 dsh"）')
 ok(idx.includes("join(homedir(), '.npm-global'"), 'resolveDsh 没猜 ~/.npm-global 这种常见前缀')
 
+// ⑲ 专题检索历史（设置页能翻、能筛，不用手动去文件夹里开）+ 工具别把整段日志倒回对话
+ok(idx.includes("'/api/bili-duty/queries'"), '没有 /queries 路由（设置页列不出历史）')
+ok(idx.includes("'/api/bili-duty/query'"), '没有单条 /query 路由（点开看报告正文）')
+ok(idx.includes("'queries.json'"), '台账没落到家目录的 queries.json')
+ok(idx.includes('const ledgerUpsert = '), '没有台账写入（历史靠扫目录会漏掉跑了哪些）')
+ok(cli.includes("jget('/queries')"), '设置页没有拉历史列表')
+ok(cli.includes("jget('/query?id='"), '设置页没有读单条报告')
+ok(cli.includes('histOnly') && cli.includes('histQ'), '历史没有筛选（关键词 / 状态）')
+ok(!idx.includes("logTail = readFileSync(r.log, 'utf8').slice(-2000)"), '还把整段日志（含着提示词/AGENTS.md）倒回对话')
+
 console.log(fail.length ? '❌ 有 ' + fail.length + ' 条没过（共 ' + total + ' 条）：' : `✅ 全部 ${total} 条断言通过`)
 for (const f of fail) console.log('   - ' + f)
 process.exit(fail.length ? 1 : 0)
