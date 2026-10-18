@@ -927,7 +927,9 @@ export function apply(ctx, config) {
     let ts = ''
     let size = 0
     try { const st = statSync(report); ts = new Date(st.mtimeMs).toISOString(); size = st.size } catch { /* 同上 */ }
-    return { id, ts, query, limit: null, dir, report, log: join(dir, id + '.log'), source: 'file', status: 'ok', exit: null, picked, size, reportExists: true, fromFile: true }
+    // 占位报告（宿主补的那份）不是真报告 ⇒ 历史里别显示成「完成」
+    const status = /这一轮没有写出报告/.test(text) ? 'error' : 'ok'
+    return { id, ts, query, limit: null, dir, report, log: join(dir, id + '.log'), source: 'file', status, exit: null, picked, size, reportExists: true, fromFile: true }
   }
   const allQueries = () => {
     const ledger = readLedger().map((x) => {
