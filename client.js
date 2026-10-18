@@ -561,7 +561,7 @@ window.__ModuleLoader__.load({
                 h('button', { 'data-bd-btn': '', disabled: busy === 'hist', onClick: () => onOpenHist(it) },
                   (histOpen === it.id ? '▾ ' : '▸ ') + it.query),
                 h('div', { 'data-bd-note': '' },
-                  `${when(it.ts)} · ${it.source === 'command' ? '命令' : '模型'} · `
+                  `${when(it.ts)} · ${it.source === 'command' ? '命令' : it.source === 'file' ? '早先跑的（没台账）' : '模型'} · `
                     + (it.status === 'ok' ? '完成' : it.status === 'running' ? '在跑' : `失败${it.exit === -1 ? '（起不来）' : '（code ' + it.exit + '）'}`)
                     + (it.status === 'ok' ? ` · 挑中 ${it.picked ?? '?'} 条` : '')
                     + (it.reportExists === false ? ' · ⚠️ 报告文件不在了' : ''))),

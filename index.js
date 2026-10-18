@@ -907,6 +907,52 @@ export function apply(ctx, config) {
     } catch (e) { log(`写专题台账失败：${e?.message ?? e}`) }
   }
 
+  /**
+   * ⭐ 历史 = 台账 + 工作区 `bilibili/` 里还没进台账的报告。
+   *    后者是为了 0.2.0 之前跑过的那几轮（台账是这一版才有的）—— 不然升级完一看历史是空的 ✗
+   *    从文件名反推 id / 时间，从第一行 `# 专题：…` 取专题名；状态未知就按 ok 显示（报告确实在）。
+   */
+  const queryFromFile = (dir, file) => {
+    const id = String(file).replace(/\.md$/i, '')
+    const report = join(dir, file)
+    let query = id.replace(/^\d{8}-\d{6}-/, '')
+    let picked = 0
+    let text = ''
+    try { text = readFileSync(report, 'utf8') } catch { /* 读不到就用文件名 */ }
+    try {
+      const first = text.split('\n')[0] || ''
+      if (first.startsWith('# 专题：')) query = first.slice(4).trim()
+    } catch { /* 同上 */ }
+    try { picked = (text.match(/^### /gm) || []).length } catch { /* 同上 */ }
+    let ts = ''
+    let size = 0
+    try { const st = statSync(report); ts = new Date(st.mtimeMs).toISOString(); size = st.size } catch { /* 同上 */ }
+    return { id, ts, query, limit: null, dir, report, log: join(dir, id + '.log'), source: 'file', status: 'ok', exit: null, picked, size, reportExists: true, fromFile: true }
+  }
+  const allQueries = () => {
+    const ledger = readLedger().map((x) => {
+      let reportExists = false
+      try { reportExists = existsSync(x.report) } catch { /* 路径失效就当没有 */ }
+      return { ...x, reportExists }
+    })
+    const known = new Set(ledger.map((x) => x.id))
+    const extra = []
+    // 扫「设置里的工作区/bilibili」—— 专题检索的默认落点；别的 dir 的扫不到，只能靠台账
+    try {
+      const ws = String(cfg.workspace || '').trim()
+      const dir = ws ? join(ws, 'bilibili') : ''
+      if (dir && existsSync(dir)) {
+        for (const f of readdirSync(dir)) {
+          if (!/\.md$/i.test(f)) continue
+          if (known.has(f.replace(/\.md$/i, ''))) continue
+          extra.push(queryFromFile(dir, f))
+        }
+      }
+    } catch { /* 扫不动就算了，台账照样能用 */ }
+    const tsOf = (x) => { const t = Date.parse(x.ts || ''); return Number.isFinite(t) ? t : 0 }
+    return [...ledger, ...extra].sort((a, b) => tsOf(b) - tsOf(a))
+  }
+
   const startQuery = ({ query, limit, dir, source = 'tool' }) => {
     refreshCfg()
     const q = String(query || '').trim()
@@ -1561,17 +1607,12 @@ export function apply(ctx, config) {
 
     // ⭐ 「专题检索历史」：设置页列出来跑过的专题 —— 点一条直接读报告正文，不用再去文件夹里翻
     if (req.method === 'GET' && path === '/api/bili-duty/queries') {
-      const items = readLedger().map((x) => {
-        let reportExists = false
-        try { reportExists = existsSync(x.report) } catch { /* 路径失效就当没有 */ }
-        return { ...x, reportExists }
-      })
-      return sendJson(res, 200, { ok: true, items, home: stateDir })
+      return sendJson(res, 200, { ok: true, items: allQueries(), home: stateDir })
     }
 
     if (req.method === 'GET' && path === '/api/bili-duty/query') {
       const id = String(url.searchParams.get('id') || '')
-      const item = readLedger().find((x) => x.id === id)
+      const item = allQueries().find((x) => x.id === id)
       if (!item) return sendJson(res, 404, { ok: false, error: '没有这条记录（可能超过 100 条，被新的挤掉了）' })
       let text = ''
       let logTail = ''
