@@ -194,6 +194,19 @@ ok(idx.includes('"commands"') || idx.includes("'commands'"), '没有 commands �
 ok(cli.includes("'aiTool'"), '设置页没有 aiTool 开关')
 ok(idx.includes('readOnly') && idx.includes('headless-overlay-query.yml'), '专题检索没有独立的只读 overlay（会拿到发评论的工具）')
 
+// ⑱ headless 的起法（2026-10-18 真机事故）：**提示词绝不能进 argv**
+//    那台机器上 resolveDsh 猜不到 dsh ⇒ 退化成 shell:true ⇒ 多行提示词被 /bin/sh 当脚本执行：
+//    子模型只收到第一行（后面每行都成了命令），提示词里的 `$( )` 会被真执行，
+//    括号/引号一不配对就 `Syntax error`、整轮 code=2。⇒ 任务正文一律走 stdin。
+ok(idx.includes('const spawnHeadless = '), '没有 spawnHeadless（两处起法各写一遍就会再漏一处）')
+ok(/args\.push\('-'\)/.test(idx), 'headless 没有用 `-` 从 stdin 读任务')
+ok(/child\.stdin\?\.end\(String\(prompt\)/.test(idx), '提示词没有写进子进程 stdin')
+ok(/stdio: \['pipe', 'pipe', 'pipe'\]/.test(idx), 'spawnHeadless 的 stdio 没给 stdin 开管道')
+ok(!/args\.push\(prompt\b/.test(idx), '还在把提示词塞进 argv（shell 一开就被当脚本执行）')
+ok(!/args\.push\(promptFor\(\)\)/.test(idx), '每日那轮还在把提示词塞进 argv')
+ok(/process\.argv\?\.\[1\]/.test(idx), 'resolveDsh 没认 argv[1]（npm 全局装的 dsh 也会报"找不到 dsh"）')
+ok(idx.includes("join(homedir(), '.npm-global'"), 'resolveDsh 没猜 ~/.npm-global 这种常见前缀')
+
 console.log(fail.length ? '❌ 有 ' + fail.length + ' 条没过（共 ' + total + ' 条）：' : `✅ 全部 ${total} 条断言通过`)
 for (const f of fail) console.log('   - ' + f)
 process.exit(fail.length ? 1 : 0)

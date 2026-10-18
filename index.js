@@ -23,7 +23,8 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
@@ -577,14 +578,33 @@ export function apply(ctx, config) {
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
   }
 
+  /**
+   * 一个 dsh 入口文件 ⇒ `{ command, args, shell }`。
+   * ⭐ Windows 的 npm 全局 shim 是 `dsh.cmd`（不能直接 exec）⇒ 顺着它找真正的 `lib/bin.js`，
+   *    找到就用 `node bin.js`（**shell: false**）。真找不到才退回 `cmd.exe /c`。
+   */
+  const dshFromFile = (p) => {
+    let file = p
+    try { file = realpathSync(p) } catch { /* 不是符号链接就用原路径 */ }
+    if (/\.(js|mjs|cjs)$/i.test(file)) return { command: process.execPath, args: [file], shell: false }
+    for (const g of [
+      join(dirname(file), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(dirname(dirname(file)), 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    ]) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
+    return { command: file, args: [], shell: false }
+  }
+
   const resolveDsh = () => {
     const explicit = String(cfg.dshBin || '').trim()
-    if (explicit && existsSync(explicit)) return { command: process.execPath, args: [explicit], shell: false }
-    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
+    if (explicit && existsSync(explicit)) return dshFromFile(explicit)
+    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib / 本机 npm 全局前缀）
     const guesses = [
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      join(homedir(), '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(homedir(), '.npm-global', 'bin', 'dsh'),
+      join(homedir(), '.local', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     ].filter(Boolean)
     // ⭐ 2026-10-16（issue #5 / #6 / #7）：**桌面版是 Electron 安装包，不是 npm -g 装的** ⇒ 上面几条全找不到
     //    ⇒ 老逻辑退到 `dsh`（PATH 里没有这个命令）⇒ 那一轮必败、而且只留下一句 exit 1 ✗
@@ -599,10 +619,58 @@ export function apply(ctx, config) {
         if (existsSync(p)) return { command: process.execPath, args: [p], shell: false }
       }
     }
-    for (const g of guesses) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
+    // ⭐ 2026-10-18：**最可靠的一条** —— 我们现在就活在 dsh 里：宿主进程的 `argv[1]` 就是 dsh 的入口
+    //    （`node /path/to/dsh --profile web`）。以前不认这条，npm 全局装的也报「找不到 dsh」，
+    //    再退到 `shell: true` ⇒ 多行提示词被 /bin/sh 当脚本执行（见 spawnHeadless 的事故注释）✗
+    //    Electron 例外：那里的 argv[1] 是应用自己的主脚本，先用上面的 resourcesPath 几条。
+    if (!process.versions.electron) {
+      const self = process.argv?.[1]
+      if (self && existsSync(self) && /\.(?:js|mjs|cjs)$/i.test(self)) return dshFromFile(self)
+    }
+    for (const g of guesses) if (existsSync(g)) return dshFromFile(g)
     // ⚠️ 走到这儿就是真找不到 —— 一定要出声（静默失败比报错更坏）
     log('⚠️ 找不到 dsh：桌面版多半不是 npm 全局安装的 ⇒ 请在设置里把「dsh 路径」指到 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js，或改用 npm 装的 dsh')
-    return { command: 'dsh', args: [], shell: true }
+    // 最后兜底：让 PATH 去找（Windows 上 dsh.cmd 得借 shell）。**提示词不走 argv**，所以这里开 shell 也不怕
+    return { command: process.platform === 'win32' ? 'dsh.cmd' : 'dsh', args: [], shell: process.platform === 'win32' }
+  }
+
+  /**
+   * ⭐ 起一轮 headless（每天那轮 / 专题检索共用）。**提示词永远走 stdin，永远不经过 shell。**
+   *
+   * 🔴 2026-10-18 事故（真机上抓到了）：以前把**多行提示词**当 argv 传给
+   *    `spawn(..., { shell: dsh.shell })`。而这台机器上 resolveDsh 猜不到 dsh ⇒ 退化成
+   *    `{ command: 'dsh', shell: true }` ⇒ 整段提示词被 `/bin/sh` 当**脚本**执行：
+   *      · 子模型只收到第一行（`sh` 把后面的行当命令了）⇒ 它的对话从第一句起就是残的，
+   *        得自己去翻日志猜任务（实测它真的去读了自己的日志 ✗）；
+   *      · 提示词里内联着 AGENTS.md 和调用方给的主题 ⇒ 那里的 `$( )` / `>` / `rm` 之类会被真执行 ✗；
+   *      · 提示词里一个不配对的 `(` 就让 `/bin/sh` 报 `Syntax error`、整轮 code=2。
+   *    ⇒ 现在：任务正文从 **stdin** 喂进去（官方支持 `dsh --profile headless … -` 读 stdin），
+   *      argv 里只剩路径，且命令本身也尽量不用 shell。
+   */
+  const spawnHeadless = ({ prompt, overlay = null, cwd, onOutput, extraEnv = {} }) => {
+    const dsh = resolveDsh()
+    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
+    if (overlay) args.push('--patch', overlay)
+    args.push('-')   // `-` = 任务正文从 stdin 读
+    const child = spawn(dsh.command, args, {
+      cwd,
+      shell: dsh.shell,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
+      //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
+      // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
+      //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5）
+      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...extraEnv, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+    })
+    // 把提示词喂进去、随即关掉 stdin（stdin 一直开着 dsh 会等"读完"）
+    try {
+      child.stdin?.on('error', () => { /* 子进程可能先退 ⇒ EPIPE，别让它变成未捕获异常 */ })
+      child.stdin?.end(String(prompt), 'utf8')
+    } catch (e) {
+      onOutput?.(`[写 stdin 失败] ${e?.message ?? e}\n`)
+    }
+    return { child, dsh, args }
   }
 
   /** 这一轮要读的章程路径（绝对路径；`<家目录>` 占位符在这里换成真路径）。 */
@@ -824,11 +892,6 @@ export function apply(ctx, config) {
     const report = join(outBase, `${ts}-${slug}.md`)
     const logFile = join(outBase, `${ts}-${slug}.log`)
     const prompt = promptForQuery({ query: q, limit: lim, reportFile: report })
-    const dsh = resolveDsh()
-    const overlay = ensureOverlay({ readOnly: true })
-    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
-    if (overlay) args.push('--patch', overlay)
-    args.push(prompt)
     try {
       appendFileSync(logFile, [
         `=== 专题检索 · ${new Date().toISOString()} · ${source} ===`,
@@ -837,25 +900,22 @@ export function apply(ctx, config) {
         `目录: ${outBase}`,
         `报告: ${report}`,
         '',
-        '--- 提示词 ---',
+        '--- 提示词（走 stdin，不进 argv / 不过 shell） ---',
         prompt,
         '--- 子进程输出 ---',
         '',
       ].join('\n'), 'utf8')
     } catch { /* 写不进去不影响跑 */ }
     log(`专题检索开跑（${source}）：${q} → ${outBase}`)
-    const child = spawn(dsh.command, args, {
-      cwd: outBase,
-      shell: dsh.shell,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
-    })
     const pick = (buf) => {
       try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
-    child.stdout?.on('data', pick)
-    child.stderr?.on('data', pick)
+    const { child } = spawnHeadless({
+      prompt,
+      overlay: ensureOverlay({ readOnly: true }),
+      cwd: outBase,
+      onOutput: pick,
+    })
     const done = new Promise((resolve) => {
       let settled = false
       const finish = (code) => {
@@ -1022,29 +1082,11 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
-    const dsh = resolveDsh()
-    const overlay = ensureOverlay()
-    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
-    if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
-    // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
-    // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
+    // ⭐ 这一轮的工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
     //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
     //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
     const cwd = stateDir
-    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
-    const child = spawn(dsh.command, args, {
-      cwd,
-      shell: dsh.shell,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
-      //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
-      // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
-      //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
-      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
-    })
     // ⚠️ 2026-10-16 issue #1（用户 `miaoxingyunduo` 贴了崩溃日志）：`duty.log` 被别的进程占着时
     //    (`EBUSY`) `appendFileSync` 会抛异常 —— 而这里是 **stream 的 data 回调**，没人接
     //    ⇒ **未捕获异常 ⇒ 整个 DSH 宿主被杀**（所有会话一起没）。跟 10-14 定时器那次是同一类 ✗
@@ -1052,8 +1094,15 @@ export function apply(ctx, config) {
     const pick = (buf) => {
       try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
-    child.stdout?.on('data', pick)
-    child.stderr?.on('data', pick)
+    // 🔴 2026-10-18（真机事故）：提示词**改走 stdin**（理由见 spawnHeadless 的注释）——
+    //    以前把多行提示词塞进 argv，一旦 shell 退化成 true 就被 `/bin/sh` 当脚本执行 ✗
+    const { child, dsh, args } = spawnHeadless({
+      prompt: promptFor(),
+      overlay: ensureOverlay(),
+      cwd,
+      onOutput: pick,
+    })
+    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     child.on('exit', (code) => {
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到

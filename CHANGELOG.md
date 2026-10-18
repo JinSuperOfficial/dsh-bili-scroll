@@ -10,6 +10,20 @@
 - 设置页新增 **「对模型开放 bilibili_skills」**（默认开）：关掉后模型看不到这个工具，
   `/bilibili-skills` 命令仍然可用。改完重启一次 dsh 生效（工具目录在启动时组装）。
 
+**修（headless 起法：提示词被 `/bin/sh` 当脚本执行 —— 会让子模型"对话从第一句就残"）**
+
+- ⭐⭐ **提示词改走 stdin，argv 里只剩路径**。旧代码把**多行提示词**当 argv 传给
+  `spawn(..., { shell: dsh.shell })`；在自己找不到 dsh 的机器上（npm 全局装、桌面版）
+  `shell` 会退化成 `true`，于是整段提示词被 `/bin/sh` 当**脚本**执行：
+  子模型只收到第一行（后面每行都成了命令，日志里一串 `sh: N: ...: not found`），
+  提示词里内联的 `AGENTS.md` / 主题里只要有 `$( )`、`>`、`rm` 就会被**真的执行**，
+  括号不配对还会 `Syntax error` 直接 code=2。现在统一走
+  `dsh --profile headless … -`（官方支持从 stdin 读任务），一条也不经过 shell。
+- ⭐ `resolveDsh()` 新增**最可靠的一条**：宿主自己的 `process.argv[1]` 就是 dsh 的入口
+  （`node /path/to/dsh --profile web`），再补上 `~/.npm-global` 等常见前缀、`dsh.cmd` 顺着找
+  `lib/bin.js`。以前明明装着 dsh 也报「找不到 dsh」，然后掉进上面那个 shell 分支。
+- 每日那轮与专题检索现在共用 `spawnHeadless()`，别再各写一遍。
+
 ---
 
 ## 0.1.8 — 2026-10-18
